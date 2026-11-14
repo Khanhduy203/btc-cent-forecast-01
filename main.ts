@@ -1,31 +1,46 @@
 // btc-cent-forecast-01 entry (Node 22, standard library only): a damped
 // mean-reversion forecast of Bitcoin's price 240 minutes after each checkpoint.
 //
-// Model: shrink the checkpoint close 25% of the way toward a short-horizon
-// "fair value" anchor — the average of the median of the last 480 closes
-// (8 h) and the mean of the last 360 closes (6 h):
+// Model: shrink the checkpoint close 25% of the way toward the median of
+// the last 240 closes (4 h):
 //
-//   anchor   = 0.5 * median(prices[-480:]) + 0.5 * mean(prices[-360:])
+//   anchor   = median(prices[-240:])
 //   forecast = last + 0.25 * (anchor - last)
 //
 // Why: the price here is one thin Orca Whirlpool's mid price, not a deep
 // exchange index. A large trade displaces it for a while and it then drifts
-// back toward the broader market. The 8 h median / 6 h mean proxy that
-// broader level from the case's own 72 h of closes, and the median is robust
-// to the pool's jumpy prints. The 25% shrinkage is deliberately mild: the
-// in-sample regression of the 4 h-ahead return on the deviation from the
-// 8 h median implies a much larger coefficient, but the checkpoints overlap
-// and the effect is regime-dependent (it pays in choppy stretches and costs
-// in hard trends), so the forecast stays close to persistence.
+// back toward the broader market. The 4 h median proxies that broader level
+// from the case's own 72 h of closes, and the median is robust to the pool's
+// jumpy prints. The 25% shrinkage is deliberately mild: the in-sample
+// regression of the 4 h-ahead return on the deviation from the anchor
+// implies a much larger coefficient, but the effect is regime-dependent (it
+// pays in choppy stretches and costs in hard trends), so the forecast stays
+// close to persistence.
 //
-// Backtest (see MODEL.md): on the practice recording, a rolling 30-minute
-// backtest over 33 checkpoints scores 47,525 cents MAE vs 50,162 for
-// persistence (-5.3%); on the six official practice cases 43,437 vs 44,522
-// (-2.4%). On 162 non-overlapping 4 h checkpoints of Binance BTC/USDT the
-// same model costs +2.2% vs persistence, which is the honest price if the
-// final window behaves like a deep market instead of the pool. Trend
-// extrapolation was tested and rejected: it loses to persistence on the
-// rolling backtest at every horizon/damping tried.
+// Why the 4 h median (and not the earlier 8 h median / 6 h mean anchor):
+// backtested on 617 non-overlapping 4 h checkpoints of the pool itself
+// (GeckoTerminal OHLCV of the same Whirlpool, Aug-Nov 2026, validated
+// against the kit's practice recording) and 612 checkpoints of Binance
+// BTC/USDT, the 4 h median anchor wins on the pool in every month
+// (Aug -0.5%, Sep -2.9%, Oct -3.8%, Nov -1.8%; pooled -2.3%, 95% CI
+// [-3.9%, -0.7%]) and beats the earlier anchor in every pool month and
+// every Binance month. The earlier anchor's edge on the 6 official
+// practice cases (-2.4% vs +2.2% for this model) is one 4-day regime
+// driven by a single case and is not significant (paired t ~ 0.8 on 6
+// cases); the 617-checkpoint pooled evidence is the reliable guide.
+// See MODEL.md for the full backtest table and the variants rejected
+// (momentum, ensembles, vol-adjusted and regime-gated shrinkage, adaptive
+// in-window regression, time-of-day effects — none robustly beats this).
+//
+// Backtest (MAE, cents; see MODEL.md):
+//   Pool (GeckoTerminal), 617 checkpoints: 45,079 vs 46,154 persistence (-2.3%)
+//   Binance BTC/USDT, 612 checkpoints:    38,068 vs 37,881 persistence (+0.5%,
+//     not significant — 95% CI [-1.3%, +2.2%])
+//   Kit practice, 33 rolling checkpoints: 48,790 vs 50,162 persistence (-2.7%)
+// The GeckoTerminal pool series carries ~$185 of spread noise that the
+// recorder's series does not, so the pool edge above is a conservative
+// (attenuated) estimate: on the practice window the same model scores
+// -2.7% on the kit series vs -1.2% on GeckoTerminal data.
 //
 // Contract (same as the kit's starter): read every <id>.in in the input
 // directory (the grader runs one case at a time, with only that case's file
@@ -57,10 +72,8 @@ const MIN_PRICE = 0.00001;
 /** The largest grid price below the scorer's exclusive 10,000,000-dollar cap. */
 const MAX_PRICE = 9_999_999.99999;
 
-/** Median window in minutes (8 h). */
-const MEDIAN_WINDOW = 480;
-/** Mean window in minutes (6 h). */
-const MEAN_WINDOW = 360;
+/** Median window in minutes (4 h). */
+const MEDIAN_WINDOW = 240;
 /** Fraction of the way from the last close toward the anchor. */
 const SHRINK = 0.25;
 
@@ -83,13 +96,6 @@ function median(values: number[]): number {
   return s.length % 2 === 1 ? (s[mid] as number) : ((s[mid - 1] as number) + (s[mid] as number)) / 2;
 }
 
-/** Arithmetic mean of a non-empty array. */
-function mean(values: number[]): number {
-  let total = 0;
-  for (const v of values) total += v;
-  return total / values.length;
-}
-
 /** The persistence guess of one market: its last close, the price at the checkpoint. */
 function persistence(m: CaseMarket): number {
   if (!Array.isArray(m.prices) || m.prices.length === 0) throw new Error(`market ${m.id} has no prices`);
@@ -100,16 +106,15 @@ function persistence(m: CaseMarket): number {
 
 /**
  * The model's guess for one market: the last close shrunk SHRINK of the way
- * toward the anchor (mean of the 8 h median and the 6 h mean). Falls back to
+ * toward the anchor (median of the last MEDIAN_WINDOW closes). Falls back to
  * persistence on any failure so a case is never invalidated by the model.
  */
 function forecast(m: CaseMarket): number {
   const last = persistence(m); // validates the series; also the fallback value
   try {
     const prices = m.prices as number[];
-    const medN = Math.min(MEDIAN_WINDOW, prices.length);
-    const meanN = Math.min(MEAN_WINDOW, prices.length);
-    const anchor = 0.5 * median(prices.slice(-medN)) + 0.5 * mean(prices.slice(-meanN));
+    const n = Math.min(MEDIAN_WINDOW, prices.length);
+    const anchor = median(prices.slice(-n));
     if (!Number.isFinite(anchor)) return last;
     const guess = prices[prices.length - 1] as number;
     return price5(guess + SHRINK * (anchor - guess));
