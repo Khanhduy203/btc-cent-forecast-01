@@ -61,6 +61,7 @@
 // stand in for /input and /output:
 //   mkdir -p out && MAKEFUN_INPUT_DIR=input MAKEFUN_OUTPUT_DIR=out node main.ts
 
+// Entry v2 — submitted 2026-11-15: 4 h median anchor, 25% shrink (see MODEL.md).
 import { mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
